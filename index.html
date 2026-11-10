@@ -12,7 +12,8 @@ button:disabled{opacity:.5}
 #chip{position:fixed;top:max(14px,env(safe-area-inset-top));left:50%;transform:translateX(-50%);z-index:4;padding:8px 16px;border-radius:999px;background:rgba(0,0,0,.55);font-size:13px;transition:opacity .4s}
 #chip.off{opacity:0}
 </style>
-<script type="importmap">{"imports":{"three":"https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js","mind-ar-three":"https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image-three.prod.js"}}</script>
+<script type="importmap">{"imports":{"three":"./vendor/three.module.js","three/addons/":"./vendor/addons/","mind-ar-three":"./vendor/mind-ar/mindar-image-three.prod.js"}}</script>
+<script>setTimeout(function(){if(!window.__arReady){document.getElementById("msg").textContent="Could not load the AR engine. Reload the page."}},8000)</script>
 </head><body>
 <div id="ar"></div><div id="chip" class="off">Point your camera at the painting</div>
 <div id="ui"><h1>Painting AR</h1><div id="msg">Hold your phone up to the painting.</div><button id="go">Start AR</button></div>
@@ -25,15 +26,15 @@ const PAINTINGS = {
   krishna: { img:'assets/krishna.jpg', mask:'assets/krishna-mask.png', target:'assets/krishna.mind',
              aspect:1330/1025, moon:{x:0.002, y:0.127, r:0.462} }
 };
+window.__arReady = true;
 const P = PAINTINGS[new URLSearchParams(location.search).get('p')] || PAINTINGS.krishna;
 const $ = s => document.querySelector(s), msg = t => $('#msg').textContent = t;
 $('#go').onclick = async () => { $('#go').disabled = true;
-  try { await start(); } catch (e) { msg('Could not start: ' + (e.message || e)); $('#go').disabled = false; } };
+  try { await start(); } catch (e) { console.error(e); msg('Could not start: ' + ((e && e.message) || e || 'camera or AR engine failed to start')); $('#go').disabled = false; } };
 
 async function getTarget() {            // use precompiled .mind if present, else compile once in-browser
   if (await fetch(P.target, {method:'HEAD'}).then(r => r.ok).catch(() => false)) return P.target;
-  await new Promise((ok, no) => { const s = document.createElement('script');
-    s.src = 'https://cdn.jsdelivr.net/npm/mind-ar@1.2.5/dist/mindar-image.prod.js'; s.onload = ok; s.onerror = no; document.head.append(s); });
+  await import('./vendor/mind-ar/mindar-image.prod.js');
   const img = new Image(); img.src = P.img; await img.decode();
   const c = new window.MINDAR.IMAGE.Compiler();
   await c.compileImageTargets([img], p => msg('Preparing painting… ' + Math.round(p) + '%'));
@@ -46,12 +47,13 @@ function moonTexture() {                // procedural maria + craters, doubles a
   let s = 7; const rnd = () => (s = (s * 16807) % 2147483647) / 2147483647;
   const blob = (px, py, r, col, a) => { const g = x.createRadialGradient(px, py, 0, px, py, r);
     g.addColorStop(0, `rgba(${col},${a})`); g.addColorStop(1, `rgba(${col},0)`); x.fillStyle = g; x.fillRect(px - r, py - r, r * 2, r * 2); };
-  for (let i = 0; i < 12; i++) blob(rnd() * W, H * .2 + rnd() * H * .6, 70 + rnd() * 90, '125,108,82', .35);
-  for (let i = 0; i < 450; i++) { const r = 3 + Math.pow(rnd(), 3) * 40, px = rnd() * W, py = rnd() * H;
+  for (let i = 0; i < 14; i++) blob(rnd() * W, H * .2 + rnd() * H * .6, 70 + rnd() * 90, '125,108,82', .28);
+  for (let i = 0; i < 800; i++) { const r = 2 + Math.pow(rnd(), 3.5) * 32, px = rnd() * W, py = rnd() * H;
     const g = x.createRadialGradient(px, py, r * .15, px, py, r);
-    g.addColorStop(0, 'rgba(95,82,62,.55)'); g.addColorStop(.75, 'rgba(150,135,110,.25)');
-    g.addColorStop(.92, 'rgba(255,250,235,.6)'); g.addColorStop(1, 'rgba(255,250,235,0)');
+    g.addColorStop(0, 'rgba(100,88,68,.42)'); g.addColorStop(.75, 'rgba(140,125,100,.16)');
+    g.addColorStop(.92, 'rgba(255,250,235,.22)'); g.addColorStop(1, 'rgba(255,250,235,0)');
     x.fillStyle = g; x.beginPath(); x.arc(px, py, r, 0, 7); x.fill(); }
+  for (let i = 0; i < 7000; i++) { x.fillStyle = `rgba(${rnd() < .5 ? '60,50,38' : '255,250,235'},.07)`; x.fillRect(rnd() * W, rnd() * H, 1.5, 1.5); }
   const t = new THREE.CanvasTexture(c); t.colorSpace = THREE.SRGBColorSpace; t.anisotropy = 4; return t;
 }
 
@@ -70,12 +72,16 @@ async function start() {
     vertexShader:'varying vec2 u;void main(){u=uv;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
     fragmentShader:'uniform sampler2D uMask;varying vec2 u;void main(){if(texture2D(uMask,u).r>.5)discard;gl_FragColor=vec4(0.);}' }));
   occ.renderOrder = 0; g.add(occ);
+  // frame of depth-only planes around the canvas so the big sphere never shows outside the painting
+  const dm = new THREE.MeshBasicMaterial({ colorWrite:false });
+  [[3, A + 6, -2, 0], [3, A + 6, 2, 0], [1, 3, 0, A / 2 + 1.5], [1, 3, 0, -(A / 2 + 1.5)]].forEach(([w, h, x, y]) => {
+    const m = new THREE.Mesh(new THREE.PlaneGeometry(w, h), dm); m.position.set(x, y, 0); m.renderOrder = 0; g.add(m); });
 
   // 2) Real 3D sphere sitting behind the canvas, seen through the moon-shaped window (true parallax)
   const tex = moonTexture();
-  const moon = new THREE.Mesh(new THREE.SphereGeometry(0.49, 64, 48), new THREE.MeshStandardMaterial({
-    map:tex, bumpMap:tex, bumpScale:2.2, emissive:0xffe2a8, emissiveMap:tex, emissiveIntensity:.55, roughness:.95 }));
-  moon.position.set(mx, my, -0.13); moon.renderOrder = 1; g.add(moon);
+  const moon = new THREE.Mesh(new THREE.SphereGeometry(0.8, 96, 64), new THREE.MeshStandardMaterial({
+    map:tex, bumpMap:tex, bumpScale:1.6, emissive:0xffe2a8, emissiveMap:tex, emissiveIntensity:.4, roughness:.95 }));
+  moon.position.set(mx, my, -0.8); moon.renderOrder = 1; g.add(moon);  // sphere sits fully behind the canvas plane (its front touches z=0)
   const sun = new THREE.DirectionalLight(0xfff0d0, 1.7); sun.position.set(-1, 1, 1.6); g.add(sun, new THREE.AmbientLight(0x8899bb, .35));
 
   // 3) Additive glow: bloom over the moon area, halo spilling onto the night sky
@@ -84,9 +90,9 @@ async function start() {
     uniforms:{ uT:{value:0}, uMask:{value:mask}, uR:{value:R}, uC:{value:new THREE.Vector2(mx, my)}, uA:{value:A} },
     vertexShader:'varying vec2 v;void main(){v=position.xy;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.);}',
     fragmentShader:`uniform float uT,uR,uA;uniform vec2 uC;uniform sampler2D uMask;varying vec2 v;
-      void main(){float r=length(v);float m=texture2D(uMask,(v+uC)/vec2(1.,uA)+.5).r;
+      void main(){vec2 q=v+uC;if(abs(q.x)>.5||abs(q.y)>uA*.5)discard;float r=length(v);float m=texture2D(uMask,(v+uC)/vec2(1.,uA)+.5).r;
       float p=.85+.15*sin(uT*1.6);
-      float outer=exp(-pow(max(r-uR,0.)/.16,2.))*smoothstep(uR*.9,uR,r)*.55;
+      float outer=exp(-pow(max(r-uR,0.)/.12,2.))*smoothstep(uR*.9,uR,r)*.3;
       float inner=(1.-smoothstep(uR*.3,uR,r))*.22*m;
       gl_FragColor=vec4(1.,.9,.65,(outer+inner)*p);}` }));
   halo.position.set(mx, my, .004); halo.renderOrder = 2; g.add(halo);
